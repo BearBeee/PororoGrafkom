@@ -2,19 +2,6 @@ import { LIBS } from "./helpers/libs.js";
 import { Node } from "./helpers/node.js";
 import { EDDY_BUILDERS as B } from "./helpers/builders.js";
 
-// =====================================================================
-//  EDDY — si rubah oranye  (versi final: animasi balon, detik 30 - 45)
-//
-//  createEddy(GL) membuat shader, mesh & hierarki Eddy di context WebGL
-//  yang sama dengan scene, lalu mengembalikan:
-//     root          : node akar (telapak kaki Eddy di y = 0)
-//     update(t)     : animasi storyline (t = detik global, berulang tiap 60 dtk)
-//                       00-30  menunggu giliran (berdiri di belakang, balon kecil di tangan)
-//                       30-45  GILIRAN EDDY: animateEddy(t) persis seperti project Eddy
-//                       45-60  showcase: rutinitas Eddy diulang mulai detik 31.5 (tanpa jalan maju)
-//     draw(scene)   : gambar Eddy + balon. scene = { P, V, M, camPos }
-//                     M = matriks dunia tempat Eddy berdiri (dari main.js)
-// =====================================================================
 export function createEddy(GL) {
     /* ================= SHADER ================= */
     var vs = `
@@ -89,17 +76,9 @@ export function createEddy(GL) {
     var blk = function () { return BLACK; };
 
     /* ================= HIERARKI EDDY ================= */
-    // Resolusi mesh dinaikkan (stack/step lebih rapat) supaya siluet & pantulan cahaya Eddy mulus, tidak bersegi.
-    /* PROPORSI (mengikuti referensi, tinggi total ~5 unit, telapak tetap menapak tanah di y = -2.57):
-         kepala + telinga ~ 60% tinggi  |  badan ~ 26% (kecil & mungil)  |  kaki + telapak ~ 14% (pendek)
-         lebar kepala ~ 2x lebar badan -> Eddy terlihat pendek & imut (chibi). */
     var eddy = new Node("Eddy", [0, -0.9, 0]);
-
-    // Badan: kecil, BUKAN oval sempurna (mengikuti sketsa referensi): bawah bulat penuh, sisi hampir lurus,
-    // dan tetap LEBAR ke arah leher (sedikit melebar menyambut kepala), tanpa leher.
     var BA = 0.60, BB = 0.72, BC = 0.52;
     var bsmooth = function (e0, e1, x) { var k = Math.min(Math.max((x - e0) / (e1 - e0), 0), 1); return k * k * (3 - 2 * k); };
-    // Perut putih: mengikuti aturan yang sama (bawah membulat, atas lebih lebar ke arah dada), menempel rata di badan
     var BELLY_CY = -0.04, BELLY_H = 0.50, BELLY_W = 0.40;
     var bellyMask = function (x, y) {
         var yn = (y - BELLY_CY) / BELLY_H;
@@ -108,7 +87,7 @@ export function createEddy(GL) {
         return bsmooth(1.0, 0.90, Math.abs(x) / half);
     };
     // [ANIMASI] Waist = pivot pinggang (seluruh tubuh bagian atas ikut berputar), Body = node induk kepala/lengan/ekor,
-    // BodyShape = mesh badan saja (di-scale untuk animasi bernapas tanpa ikut membesarkan kepala & lengan).
+    // BodyShape = mesh badan saja
     var waist = part(eddy, "Waist", null, [0, -0.58, 0]);
     var body = part(waist, "Body", null, [0, 0.35, 0]);
     var bodyShape = part(body, "BodyShape", B.generateEddyBody(BA, BB, BC, 192, 192,
@@ -121,13 +100,13 @@ export function createEddy(GL) {
             return 0.05 * Math.exp(-Math.pow(x / 0.32, 2) - Math.pow((y + 0.10) / 0.42, 2));
         }));
 
-    /* ----- KEPALA & ORNAMEN WAJAH (Segitiga lembut / bakpao: sempit di atas, lebar di pipi bawah) ----- */
-    // K = skala seluruh kepala (wajah & telinga ikut). Kepala dibuat lebih besar & jauh lebih lebar dari badan.
+    /* ----- KEPALA & ORNAMEN WAJAH (Segitiga: sempit di atas, lebar di pipi bawah) ----- */
+    // K = skala seluruh kepala (wajah & telinga ikut).
     var K = 1.15;
     var HA = 1.04 * K, HB = 0.78 * K, HC = 0.76 * K;   // lebar > tinggi, tidak terlalu dalam (depan-belakang)
     var head = part(body, "Head", B.generateHead(HA, HB, HC, 96, 96, ORANGE), [0, 1.47, 0]);
 
-    /* ----- WAJAH NETRAL (mengikuti referensi) -----
+    /* ----- WAJAH -----
        - Moncong putih lebih SEMPIT & lebih RENDAH: dari bawah mata sampai dagu (bukan oval lebar di tengah wajah).
        - Di bawah hidung ada 2 bantalan bibir tembam yang membentuk lekuk "w" (tanpa garis hitam).
        - Mulut sedikit terbuka (merah gelap) di antara bantalan bibir & dagu putih kecil.
@@ -163,7 +142,7 @@ export function createEddy(GL) {
         [0, MY, B.headSurfaceZ(HA, HB, HC, 0, MY) - 0.13 * K]);
     var faceZ = function (x, y) { return B.muzzleSurfaceZ(MR[0], MR[1], MR[2], muzzleOffset, x, y) + 0.005; };
 
-    // MULUT TERTUTUP (netral): garis tipis coklat gelap di dasar lekuk "w"
+    // MULUT TERTUTUP: garis tipis coklat gelap di dasar lekuk "w"
     var LINE = [0.16, 0.09, 0.07];                                          // coklat gelap (lebih natural dari hitam pekat)
     var lineR = function (t) { return 0.010 * K * Math.pow(Math.sin(Math.PI * t), 0.35) + 0.002; };   // ujung meruncing
     var lineC = function () { return LINE; };
@@ -190,7 +169,7 @@ export function createEddy(GL) {
     [-1, 1].forEach(function (side) {
         var tag = side < 0 ? "L" : "R";
 
-        // Mata NETRAL: titik hitam oval kecil (sedikit lebih tinggi dari lebarnya), menghadap normal permukaan kepala
+        // Mata NETRAL: titik hitam oval kecil
         var ex = side * 0.50 * K, ey = -0.02 * K, ez = B.headSurfaceZ(HA, HB, HC, ex, ey);
         var nx = ex / (HA * HA), ny = ey / (HB * HB), nz = ez / (HC * HC);
         var eyePos = [ex, ey, ez - 0.012 * K], eyeRot = [-Math.atan2(ny, Math.hypot(nx, nz)), Math.atan2(nx, nz), 0];
@@ -206,8 +185,8 @@ export function createEddy(GL) {
             function (t) { return (0.006 + 0.016 * Math.pow(Math.sin(Math.PI * t), 0.6)) * K; }, function () { return INK; }), [0, 0, 0.03 * K]);
         happyEyes.push(happyHolder);
 
-        // TELINGA: lebar & membulat (tidak lancip), tegak ke atas (hanya sedikit condong ke luar) seperti referensi.
-        // Tumbuh dari sudut atas kepala; tepi luarnya menyambung garis pipi -> siluet kepala+telinga seperti rubah.
+        // TELINGA: lebar & membulat, tegak ke atas 
+        // Tumbuh dari sudut atas kepala; tepi luarnya menyambung garis pipi -> siluet kepala+telinga.
         // Pangkal telinga diperpanjang masuk ke kepala & bagian yang keluar dari kepala ditekuk halus ke permukaan kepala,
         // sehingga dari samping telinga terlihat TUMBUH dari kepala (tidak ada bibir/tepi telinga yang menggantung).
         var earPos = [side * 0.40 * K, 0.22 * K, -0.10 * K], earRot = [rad(-4), side * rad(8), -side * rad(15)];
