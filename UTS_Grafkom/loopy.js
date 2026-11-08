@@ -1,5 +1,6 @@
 import { Node } from "./helpers/node.js";
 import { LOOPY_BUILDERS as B } from "./helpers/builders.js";
+import { createLoopyAnimation } from "./loopy-anim.js";
 
 // =====================================================================
 //  LOOPY — si berang-berang merah muda
@@ -7,7 +8,7 @@ import { LOOPY_BUILDERS as B } from "./helpers/builders.js";
 //  createLoopy(GL) membuat shader, mesh & hierarki Loopy di context WebGL
 //  yang sama dengan scene, lalu mengembalikan:
 //     root          : node akar (dasar telapak Loopy di y = 0, tinggi 4.17 unit)
-//     update(t)     : animasi (napas, menengok, kedip, wink, melambai, ekor)
+//     update(t)     : animasi (napas, menengok, kedip, wink, melambai, ekor, LARI mengejar kupu-kupu)
 //     draw(scene)   : gambar Loopy. scene = { P, V, M, camPos }
 // =====================================================================
 export function createLoopy(GL) {
@@ -184,10 +185,12 @@ export function createLoopy(GL) {
     });
     part(head, "mata-kiri",  eyeMesh, [-0.47, 0.405, 1.21]);
     part(head, "mata-kanan", eyeMesh, [ 0.47, 0.405, 1.21]);
-    part(head, "mata-wink",  null,    [ 0.47, 0.385, 1.205]);   // garis wink (tersembunyi dulu)
+    part(head, "mata-wink-kiri", null, [-0.47, 0.385, 1.205]);   // garis wink kiri (tersembunyi dulu)
+    part(head, "mata-wink",  null,    [ 0.47, 0.385, 1.205]);   // garis wink kanan (tersembunyi dulu)
     part(head, "hidung", noseMesh, [0, -0.08, 1.26]);
     var mouth = part(head, "mulut", mouthMesh, [0, -0.60, 1.165]);
-    part(mouth, "gigi", teethMesh, [0, -0.065, 0.03]);
+    // gigi anak KEPALA (bukan mulut) supaya ukurannya tidak ikut membesar saat mulut melebar untuk senyum
+    part(head, "gigi", teethMesh, [0, -0.60 - 0.065, 1.165 + 0.03]);
     // jambul huruf V: grup di pangkal daun 1; daun 2 digeser relatif
     var tuft = part(head, "jambul", null, [0.09, 1.96, 0]);
     part(tuft, "jambul-daun1", tuftMesh1, [0, 0, 0], [0, 0, -0.22]);
@@ -225,7 +228,6 @@ export function createLoopy(GL) {
     var tailBase = part(loopy, "pangkal-ekor", null, TAIL_P0.slice());
     part(tailBase, "ekor", tailMesh, [-TAIL_P0[0], -TAIL_P0[1], -TAIL_P0[2]]);
 
-    loopy.printTree();
     window.loopy = loopy;
 
     /* ================= SKALA TINGGI KARAKTER =================
@@ -238,7 +240,31 @@ export function createLoopy(GL) {
     var CHAR_SCALE = 4.17 / (MODEL_TOP - MODEL_BOTTOM);
     // Node "LoopyRoot": M = T * S  ->  diskalakan dulu, lalu diangkat (dasar telapak -2.47 * skala -> y = 0)
     var root = new Node("LoopyRoot", [0, -MODEL_BOTTOM * CHAR_SCALE, 0], [0, 0, 0], [CHAR_SCALE, CHAR_SCALE, CHAR_SCALE]);
-    root.add(loopy);
+    // Node "lari" (runner) = penggerak seluruh badan Loopy di lantai: TRANSLASI (x,z) + ROTASI arah hadap (sumbu Y).
+    // Dipisah dari root agar posisi/skala root yang diatur main.js tidak terganggu.
+    var runner = new Node("lari", [0, 0, 0], [0, 0, 0]);
+    root.add(runner);
+    runner.add(loopy);
+
+    /* ----- KUPU-KUPU (anak ROOT, bukan anak kepala): badan + 2 pasang sayap + 2 antena -----
+       Dijadikan anak root supaya terbang sendiri di ruang dunia dan TIDAK ikut bergerak saat Loopy berlari
+       (kalau jadi anak kepala, kupu-kupu akan ikut terbawa dan Loopy tidak pernah 'mengejar' apa pun).
+       Sumbu lokal: badan memanjang di +z (depan), sayap terbentang di sumbu x, kepakan = rotasi z di pivot sayap.
+       Posisi & orientasi (termasuk ARBITRARY AXIS) diatur di loopy-anim.js (koordinat frame root). Mulai tersembunyi (skala 0). */
+    var BF_BODY = [0.25, 0.15, 0.10], BF_FORE = [1.00, 0.78, 0.25], BF_HIND = [1.00, 0.52, 0.20];
+    var bfBodyMesh = makeMesh(B.generateEllipsoid(0.035, 0.035, 0.17, BF_BODY, 16, 12));
+    var bfForeMesh = makeMesh(B.generateEllipsoid(0.30, 0.012, 0.21, BF_FORE, 28, 16));
+    var bfHindMesh = makeMesh(B.generateEllipsoid(0.20, 0.012, 0.15, BF_HIND, 24, 14));
+    var bfAntMesh  = makeMesh(B.generateCone(0.008, 0.14, BF_BODY, 8));
+    var butterfly = part(root, "kupu-kupu", bfBodyMesh, [0, 0, 0]);
+    butterfly.scale = [0, 0, 0];
+    var bfWings = [-1, 1].map(function (side) {
+        var w = part(butterfly, side < 0 ? "sayap-kiri" : "sayap-kanan", null, [side * 0.03, 0, 0.03]);
+        part(w, "sayap-depan",    bfForeMesh, [side * 0.28, 0, 0.05]);
+        part(w, "sayap-belakang", bfHindMesh, [side * 0.19, 0, -0.14]);
+        part(butterfly, "antena", bfAntMesh, [side * 0.02, 0.0, 0.15], [Math.PI / 2 - 0.25, 0, -side * 0.35]);
+        return w;
+    });
 
     /* ================= ANIMASI =================
        Karena hierarki, anak ikut bergerak:
@@ -249,53 +275,22 @@ export function createLoopy(GL) {
          - ekor menggeleng dari pangkalnya, kaki bergantian terangkat sedikit
        SPASI = jeda / lanjut (diatur di main.js). */
     var A = {
-        badan: loopy, kepala: head, jambul: tuft, ekor: tailBase,
+        root: root, runner: runner, badan: loopy, kepala: head, jambul: tuft, ekor: tailBase,
         earL: loopy.find("telinga-kiri"), earR: loopy.find("telinga-kanan"),
-        eyeL: loopy.find("mata-kiri"), eyeR: loopy.find("mata-kanan"), wink: loopy.find("mata-wink"),
+        eyeL: loopy.find("mata-kiri"), eyeR: loopy.find("mata-kanan"), winkR: loopy.find("mata-wink"), winkL: loopy.find("mata-wink-kiri"),
+        mulut: mouth, hidung: loopy.find("hidung"), kupu: butterfly, sayapL: bfWings[0], sayapR: bfWings[1],
         bahuL: loopy.find("bahu-kiri"), bahuR: loopy.find("bahu-kanan"),
         kakiL: loopy.find("kaki-kiri"), kakiR: loopy.find("kaki-kanan")
     };
-    var smooth01 = function (x) { x = Math.max(0, Math.min(1, x)); return x * x * (3 - 2 * x); };
+    // Logika animasi ada di loopy-anim.js; di sini hanya dirangkai dengan node & mesh Loopy.
+    var updateAnimation = createLoopyAnimation({
+        A: A, BODY_Y: BODY_Y, HEAD_Y: HEAD_Y, LEG_Y: -1.34, eyeMesh: eyeMesh, winkMesh: winkMesh,
+        nose: [0, 0.34, 1.46]      // titik pusat kupu-kupu bertengger di atas hidung (koordinat kepala)
+        // opsional: windows: [[20, 35], [45, 60]] (detik, giliran Loopy & showcase), loop: 60,
+        //           runRx / runRz: jangkauan lintasan lari (unit model) kiri-kanan / depan-belakang
+    });
 
-    function updateAnimation(t) {
-        // napas / bob
-        var bob = 0.03 * Math.sin(t * 3.0);
-        A.badan.position[1] = BODY_Y + bob;
-
-        // kepala menengok & miring
-        A.kepala.rotation[0] = 0.04 * Math.sin(t * 1.5);
-        A.kepala.rotation[1] = 0.30 * Math.sin(t * 0.9);
-        A.kepala.rotation[2] = 0.07 * Math.sin(t * 1.3);
-
-        // telinga & jambul bergoyang
-        A.earL.rotation[2] =  0.10 * Math.sin(t * 4.0);
-        A.earR.rotation[2] = -0.10 * Math.sin(t * 4.0 + 1.0);
-        A.jambul.rotation[2] = 0.12 * Math.sin(t * 5.0);
-
-        // kedip biasa: tiap 3.2 detik, kelopak menutup selama 0.15 detik
-        var ph = t % 3.2;
-        var lid = ph < 0.15 ? Math.sin(ph / 0.15 * Math.PI) : 0.0;
-        A.eyeL.scale = [1, 1 - 0.92 * lid, 1];
-
-        // WINK mata kanan di tengah lambaian (siklus 6 dtk): menyipit dulu, lalu (w > 0.6) bola mata -> garis "⌒"
-        var w = smooth01((Math.sin(t / 6.0 * 2.0 * Math.PI) - 0.45) * 5.0);
-        A.eyeR.scale = [1, 1 - 0.92 * Math.max(lid, w), 1];
-        var winking = w > 0.6;
-        A.eyeR.mesh = winking ? null : eyeMesh;
-        A.wink.mesh = winking ? winkMesh : null;
-
-        // lambaian tangan kanan (aktif separuh siklus 6 dtk), tangan kiri mengayun pelan
-        var env = smooth01(2.5 * Math.sin(t / 6.0 * 2.0 * Math.PI));
-        A.bahuR.rotation[2] = env * (1.05 + 0.28 * Math.sin(t * 9.0)) + (1 - env) * 0.05 * Math.sin(t * 3.0);
-        A.bahuL.rotation[2] = -0.06 * Math.sin(t * 3.0 + 1.0);
-
-        // ekor menggeleng kiri-kanan dari pangkalnya
-        A.ekor.rotation[1] = 0.28 * Math.sin(t * 3.0);
-
-        // kaki bergantian terangkat; dikompensasi bob supaya tidak melayang
-        A.kakiL.position[1] = -1.34 - bob + 0.05 * Math.max(0, Math.sin(t * 1.5));
-        A.kakiR.position[1] = -1.34 - bob + 0.05 * Math.max(0, Math.sin(t * 1.5 + Math.PI));
-    }
+    root.printTree();
 
     /* ================= RENDER ================= */
     var STRIDE = 4 * 9;   // pos(3) + color(3) + normal(3)
