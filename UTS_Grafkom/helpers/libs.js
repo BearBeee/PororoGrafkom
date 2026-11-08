@@ -44,9 +44,24 @@ export var LIBS = {
 
     // M = T * Rz * Ry * Rx * S   (pos=[x,y,z], rot=[rx,ry,rz] radian, scale=[sx,sy,sz] opsional)
     // (artinya: di-scale dulu, lalu diputar X, Y, Z, terakhir digeser)
-    compose: function (pos, rot, scale) {
+    // ARBITRARY ROTATE: rotasi sebesar `angle` (radian) mengelilingi sumbu sembarang `axis` = [x, y, z]
+    // (rumus Rodrigues, sumbu dinormalisasi dulu). Untuk sumbu X/Y/Z hasilnya sama dengan rotX/rotY/rotZ.
+    rotAxis: function (axis, angle) {
+        var l = Math.hypot(axis[0], axis[1], axis[2]) || 1;
+        var x = axis[0] / l, y = axis[1] / l, z = axis[2] / l;
+        var c = Math.cos(angle), s = Math.sin(angle), t = 1 - c;
+        return [t*x*x + c,     t*x*y + z*s, t*x*z - y*s, 0,
+                t*x*y - z*s,   t*y*y + c,   t*y*z + x*s, 0,
+                t*x*z + y*s,   t*y*z - x*s, t*z*z + c,   0,
+                0, 0, 0, 1];
+    },
+
+    // M = T * Raxis * Rz * Ry * Rx * S
+    //   axisAngle = { axis: [x,y,z], angle } (opsional) -> rotasi sumbu sembarang (Eddy & Loopy)
+    compose: function (pos, rot, scale, axisAngle) {
         rot = rot || [0, 0, 0];
         var R = LIBS.multiply(LIBS.rotZ(rot[2]), LIBS.multiply(LIBS.rotY(rot[1]), LIBS.rotX(rot[0])));
+        if (axisAngle && axisAngle.angle) R = LIBS.multiply(LIBS.rotAxis(axisAngle.axis, axisAngle.angle), R);
         var M = LIBS.multiply(LIBS.translate(pos[0], pos[1], pos[2]), R);
         if (scale) M = LIBS.multiply(M, LIBS.scale(scale[0], scale[1], scale[2]));
         return M;

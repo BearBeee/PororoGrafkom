@@ -12,7 +12,10 @@
 //    import { POBY_BUILDERS as B }  from "./helpers/builders.js";
 //    import { LOOPY_BUILDERS as B } from "./helpers/builders.js";
 //
-//  The environment (snow world) uses EDDY_BUILDERS.
+//  Each character file keeps its measurements + hierarchy; the shapes are
+//  made here (e.g. Eddy: generateHead / generateLegPaw, Poby: pobyBody /
+//  pobyHead / pobyArm / pobyPaw, plus the bubble-wand props).
+//  The old snow environment (environment_snow.js) uses EDDY_BUILDERS.
 // =====================================================================
 
 // #####################################################################
@@ -785,7 +788,504 @@ export const POBY_BUILDERS = (function () {
         return { vertices: v, faces: f };
     }
 
+
+    // =====================================================================
+    // 3. POBY'S OWN SHAPES
+    //    The measurements (tables in cm) stay in poby.js; these functions
+    //    turn them into meshes, the same way EDDY_BUILDERS makes Eddy's
+    //    head / body / legs from the numbers in eddy.js.
+    // =====================================================================
+
+    // ---------- small vector + table helpers ----------
+    function sub(a, b) { return [a[0] - b[0], a[1] - b[1], a[2] - b[2]]; }
+    function add(a, b, c, d) {                              // sum of 2 to 4 vectors
+        var r = [a[0] + b[0], a[1] + b[1], a[2] + b[2]];
+        if (c) r = [r[0] + c[0], r[1] + c[1], r[2] + c[2]];
+        if (d) r = [r[0] + d[0], r[1] + d[1], r[2] + d[2]];
+        return r;
+    }
+    function mul(a, k) { return [a[0] * k, a[1] * k, a[2] * k]; }
+    function dot(a, b) { return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]; }
+    function cross(a, b) { return [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]]; }
+    function normalize(a) { var l = Math.hypot(a[0], a[1], a[2]) || 1; return [a[0] / l, a[1] / l, a[2] / l]; }
+    function dist(a, b) { return Math.hypot(a[0] - b[0], a[1] - b[1], a[2] - b[2]); }
+    function smooth(s) {                                    // 0..1 with soft start and end ("smoothstep")
+        s = Math.min(1, Math.max(0, s));
+        return s * s * (3 - 2 * s);
+    }
+    // the row of a sampled table at key t (linear interpolation between samples)
+    function lookup(rows, t) {
+        if (t <= rows[0][0]) return rows[0];
+        for (var i = 1; i < rows.length; i++) {
+            if (rows[i][0] >= t) {
+                var a = rows[i - 1], b = rows[i], s = (t - a[0]) / ((b[0] - a[0]) || 1);
+                return a.map(function (v, k) { return v + (b[k] - v) * s; });
+            }
+        }
+        return rows[rows.length - 1];
+    }
+    function superellipse(v, n) { return Math.sign(v) * Math.pow(Math.abs(v), 2 / n); }
+    // key of a point (used to remember the rig weight of every leg point)
+    function rigKey(x, y, z) { return Math.round(x * 100) + "," + Math.round(y * 100) + "," + Math.round(z * 100); }
+
+    // ---------------------------------------------------------------------
+    // 3a. BODY: torso + legs + feet, one continuous skin
+    //   spec = { torso, torsoSquare, backShare, chestBackShare,
+    //            leg, legSteps, foot, footX, ankleBlend }   (see poby.js)
+    // ---------------------------------------------------------------------
+    // A leg ring point at angle t sits at "across" = (1 + cos t) / 2 of the way
+    // from the leg's inner edge (0) to its outer edge (1). On the torso's right
+    // half we use the point with the same "across" value, so leg and torso rings
+    // have exactly the same points where they meet.
+    function acrossOf(t) { return (1 + Math.cos(t)) / 2; }
+    function pobyBody(spec) {
+        var LEG = spec.leg, FOOT = spec.foot;
+
+        // BODY CROSS-SECTION: the oval is split into a FRONT half and a BACK half
+        // around z0 (backShare of the way from the back to the front). The back is
+        // much deeper than the front ("backwards belly"), so with two halves the
+        // front keeps full, boxy corners and only the back carries the big round
+        // back. Higher up (the chest) the front gets a bigger share (chestBackShare).
+        function bodyHalves(zf, zb, y) {
+            var share = spec.backShare + (spec.chestBackShare - spec.backShare) * smooth(((y || 0) - 17) / 6);
+            var z0 = zb + (zf - zb) * share;
+            return { z0: z0, front: zf - z0, back: z0 - zb };
+        }
+        function halfBodyPoint(t, W, zf, zb, y) {
+            var h = bodyHalves(zf, zb, y), u = acrossOf(t);
+            var k = Math.sqrt(Math.max(0, 1 - u * u));
+            return [W * u, Math.sin(t) >= 0 ? h.z0 + h.front * k : h.z0 - h.back * k];
+        }
+        // all torso ring angles: the right half (from the legs' angles) and its mirror on the left
+        function torsoRingAngles(steps) {
+            var q = [];                                              // 0 .. π/2 (right front quarter)
+            for (var j = 0; j <= steps / 2; j++) q.push(Math.acos(acrossOf(j / steps * 2 * Math.PI)));
+            var out = q.slice();
+            for (var j = q.length - 2; j >= 0; j--) out.push(Math.PI - q[j]);      // left front
+            for (var j = 1; j < q.length; j++) out.push(Math.PI + q[j]);           // left back
+            for (var j = q.length - 2; j >= 0; j--) out.push(2 * Math.PI - q[j]);  // right back
+            return out;
+        }
+        // back of the shorts at height y (v = the cone's size factor there): the
+        // ring's centre z and front-to-back radius b, so the front stays at
+        // LEG.z + LEG.b·v and the back reaches back by backFoot .. backFlare
+        function legBack(y, v) {
+            var footTop = FOOT[FOOT.length - 1][0];
+            var k = LEG.backFoot + (LEG.backFlare - LEG.backFoot) * smooth((y - footTop) / (LEG.coneTop - footTop));
+            var bv = LEG.b * v;
+            return { z: LEG.z - bv * (k - 1) / 2, b: bv * (1 + k) / 2 };
+        }
+        // elliptic cone (quadric table): size factor v at height y
+        function coneV(y) { return LEG.v0 + (y - LEG.bottom) / (LEG.coneTop - LEG.bottom) * (1 - LEG.v0); }
+
+        var torsoRows = bsplineTable(spec.torso, 120);
+        var torsoRings = torsoRows.filter(function (r) { return r[0] >= LEG.top; }).map(function (r) {
+            var h = bodyHalves(r[2], r[3], r[0]);
+            return { c: [0, r[0], h.z0], a: Math.max(r[1], 0), bf: Math.max(h.front, 0), bb: Math.max(h.back, 0) };
+        });
+        var legTop = torsoRings[0].c[1];                     // exactly where the torso mesh starts
+        var footRows = bsplineTable(FOOT, 30), footTopY = footRows[footRows.length - 1][0];
+
+        // TORSO: superellipse rings, n = 2 at the hips (so the legs join exactly),
+        // squarer (torsoSquare) from the belly up; the front half stays a plain oval
+        function torsoMesh(color) {
+            var angles = torsoRingAngles(spec.legSteps);
+            return generateRingSurfaceFromPoints(torsoRings.map(function (R) {
+                var n = 2 + (spec.torsoSquare - 2) * smooth((R.c[1] - 19) / 6);
+                return angles.map(function (phi) {
+                    var c = Math.cos(phi), sn = Math.sin(phi);
+                    var x = R.a * Math.sign(c) * Math.pow(Math.abs(c), 2 / n);
+                    if (Math.abs(x) < 0.05) x = 0;             // same snap as the legs, so the points match
+                    var nz = sn >= 0 ? 2 : n;
+                    return [x, R.c[1], R.c[2] + (sn >= 0 ? R.bf : R.bb) * Math.sign(sn) * Math.pow(Math.abs(sn), 2 / nz)];
+                });
+            }), color, true);
+        }
+
+        // LEG: rings from the hip (legTop) down to the top of the foot. Near the hip
+        // each ring is the matching half of the torso cross-section; lower down it
+        // turns into the elliptic cone. Returns the mesh and the RIG WEIGHT of every
+        // point (how "leg-shaped" it is: 0 = still body, 1 = leg).
+        function leg(side, color) {
+            var STEPS = spec.legSteps, ROWS = 90, rings = [], weights = {};
+            for (var i = 0; i <= ROWS; i++) {
+                var y = legTop + (footTopY - legTop) * i / ROWS, v = coneV(y);
+                var hip = lookup(torsoRows, y);                 // the torso outline at this height
+                // round crotch arch: the legs may not come closer than this to the middle
+                var yc = LEG.archTop - LEG.archR;
+                var gap = y >= LEG.archTop ? 0 : (y > yc ? Math.sqrt(LEG.archR * LEG.archR - (y - yc) * (y - yc)) : LEG.archR);
+                var sInner = smooth((LEG.archTop - y) / 1.5);   // between the legs: joined above the arch, apart below
+                var ring = [];
+                for (var j = 0; j <= STEPS; j++) {
+                    var t = j / STEPS * 2 * Math.PI, u = acrossOf(t);
+                    // the front rolls under into the leg along a "U": foldMid in the middle, foldHip at the hips
+                    var yFold = LEG.foldMid + (LEG.foldHip - LEG.foldMid) * u;
+                    var s = smooth((yFold + LEG.foldWidth / 2 - y) / LEG.foldWidth);
+                    var half = halfBodyPoint(t, hip[1], hip[2], hip[3], y);
+                    // back of the shorts: the centre moves back, the front stays put
+                    var lb = legBack(y, v), sn = Math.sin(t);
+                    if (sn < 0) {                                   // back half: squarer towards the top
+                        var nb = 2 + (LEG.backSquare - 2) * smooth((y - footTopY) / (LEG.coneTop - footTopY));
+                        sn = -Math.pow(-sn, 2 / nb);
+                    }
+                    var cone = [LEG.x + LEG.a * v * Math.cos(t), lb.z + lb.b * sn];
+                    // back half: the long, slow fold under the bottom (backFoldTop), eased in around the sides
+                    var sBack = smooth((LEG.backFoldTop - y) / LEG.backFoldLen);
+                    s = s + (sBack - s) * smooth(-Math.sin(t) / 0.6);
+                    // x: points near the middle (small u) wait for the arch
+                    var sx = s + (Math.min(s, sInner) - s) * smooth((0.25 - u) / 0.25);
+                    var x = half[0] + (cone[0] - half[0]) * sx;
+                    // back middle: the round bottom stays whole until just above the split,
+                    // then sinks in slowly over 4 cm (a soft valley, no slit)
+                    var sInnerZ = smooth((LEG.archTop + 0.8 - y) / 4.0);
+                    var sz = s + (Math.min(s, sInnerZ) - s) * smooth((0.3 - u) / 0.3) * smooth(-Math.sin(t) / 0.6);
+                    var z = half[1] + (cone[1] - half[1]) * sz;
+                    x = Math.max(x, gap);
+                    if (x < 0.05) x = 0;           // snap onto the middle line so both legs meet exactly
+                    ring.push([side * x, y, z]);
+                    weights[rigKey(side * x, y, z)] = Math.min(sx, sz);
+                }
+                rings.push(ring);
+            }
+            // where the legs are still joined, part of each ring lies flat on the middle
+            // line (a hidden wall): leave out every piece whose 4 corners lie there
+            function onMiddle(p) { return Math.abs(p[0]) < 0.05; }
+            var mesh = generateRingSurfaceFromPoints(rings, color, side < 0, function (i, j) {
+                return onMiddle(rings[i][j]) && onMiddle(rings[i][j + 1]) &&
+                       onMiddle(rings[i + 1][j]) && onMiddle(rings[i + 1][j + 1]);
+            });
+            return { mesh: mesh, weights: weights };
+        }
+
+        // FOOT: ring surface; the first ring has size 0 so the sole is flat. Over the
+        // top ankleBlend cm each ring turns into the leg's cone ring (no ankle ledge).
+        function foot(side, color) {
+            var rings = [{ c: [side * spec.footX, 0, (footRows[0][2] + footRows[0][3]) / 2], u: [1, 0, 0], w: [0, 0, 1], a: 0, b: 0 }]
+                .concat(footRows.map(function (r, k) {
+                    var y = r[0], ring = { x: spec.footX, z: (r[2] + r[3]) / 2, a: r[1], b: (r[2] - r[3]) / 2 };
+                    var v = coneV(y), lb = legBack(y, v), cone = { x: LEG.x, z: lb.z, a: LEG.a * v, b: lb.b };
+                    var s = k === footRows.length - 1 ? 1 : smooth((y - (footTopY - spec.ankleBlend)) / spec.ankleBlend);
+                    ["x", "z", "a", "b"].forEach(function (q) { ring[q] += (cone[q] - ring[q]) * s; });
+                    return { c: [side * ring.x, y, ring.z], u: [1, 0, 0], w: [0, 0, 1], a: ring.a, b: ring.b };
+                }));
+            return generateRingSurface(rings, spec.legSteps, color, true);
+        }
+
+        return { torsoRows: torsoRows, footRows: footRows, legTop: legTop, torsoMesh: torsoMesh, leg: leg, foot: foot };
+    }
+
+    // ---------------------------------------------------------------------
+    // 3b. HEAD: superellipse rings |x/a|^n + |y/b|^n = 1 through the HEAD table
+    //   rows [z, top y, bottom y, half-width]; square = how square the face is.
+    //   Returns the mesh + ways to find points ON the head (for eyes / mouth).
+    // ---------------------------------------------------------------------
+    function pobyHead(table, square, steps, color) {
+        var rows = bsplineTable(table, 100);
+        // n grows from 2 (round back) to 2 + square (fuller cheeks and jaw)
+        function headN(z) { return 2 + square * smooth((z + 3) / 6) - 0.2 * smooth((z - 8) / 4); }
+        function ringN(n, upper) { return upper ? 2 + (n - 2) * 0.3 : n; }   // the crown stays rounder than the jaw
+        var mesh = generateRingSurfaceFromPoints(rows.map(function (r) {
+            var yc = (r[1] + r[2]) / 2, a = Math.max(r[3], 0), b = Math.max((r[1] - r[2]) / 2, 0), n = headN(r[0]), pts = [];
+            for (var j = 0; j <= steps; j++) {
+                var t = j / steps * 2 * Math.PI, nt = ringN(n, Math.sin(t) > 0);
+                pts.push([a * superellipse(Math.cos(t), nt), yc + b * superellipse(Math.sin(t), nt), r[0]]);
+            }
+            return pts;
+        }), color);
+        // x of the head surface at depth z and height y
+        function x(z, y) {
+            var r = lookup(rows, z), yc = (r[1] + r[2]) / 2, b = (r[1] - r[2]) / 2;
+            var n = ringN(headN(z), y > yc);
+            return r[3] * Math.pow(Math.max(0, 1 - Math.pow(Math.abs((y - yc) / b), n)), 1 / n);
+        }
+        // front-most z of the head surface at (x, y): walk backwards from the tip
+        function frontZ(px, y) {
+            for (var z = 12.6; z > -5; z -= 0.01) if (Math.abs(px) <= x(z, y)) return z;
+            return 0;
+        }
+        // point on the head at depth z, angle t around the ring (+ its outward direction)
+        function point(z, t) {
+            var r = lookup(rows, z), yc = (r[1] + r[2]) / 2, b = (r[1] - r[2]) / 2, nt = ringN(headN(z), Math.sin(t) > 0);
+            var p = [r[3] * superellipse(Math.cos(t), nt), yc + b * superellipse(Math.sin(t), nt), z];
+            return { p: p, out: normalize([p[0] / (r[3] || 1), (p[1] - yc) / (b || 1), 0]) };
+        }
+        // angle t of the side point (z, y) on the right
+        function angleOf(z, y) {
+            var r = lookup(rows, z), yc = (r[1] + r[2]) / 2, b = (r[1] - r[2]) / 2, n = headN(z);
+            var s = Math.min(1, Math.abs((y - yc) / b));
+            return -Math.asin(Math.pow(s, n / 2));
+        }
+        return { mesh: mesh, x: x, frontZ: frontZ, point: point, angleOf: angleOf };
+    }
+
+    // a LINE ON THE HEAD (the mouth): a B-spline through [z, angle] control points,
+    // every point put on the head surface, drawn as a thin tube of radius r.
+    // Returns the mesh + the two end points (for the round dots at the ends).
+    function generateHeadLine(head, cp, r, color) {
+        var line = generateBSpline(cp, 200, 3), pts = [];
+        for (var i = 0; i < line.length; i += 2) {
+            var hp = head.point(line[i], line[i + 1]);
+            pts.push({ p: add(hp.p, mul(hp.out, 0.02)), out: hp.out });   // sits half in the skin
+        }
+        var rings = pts.map(function (m, i) {
+            var a = pts[Math.max(i - 1, 0)].p, b = pts[Math.min(i + 1, pts.length - 1)].p;
+            var T = normalize(sub(b, a));
+            var N = normalize(sub(m.out, mul(T, dot(m.out, T)))), Bn = cross(T, N), ring = [];
+            for (var j = 0; j <= 12; j++) {
+                var th = j / 12 * 2 * Math.PI;
+                ring.push(add(m.p, mul(N, r * Math.cos(th)), mul(Bn, r * Math.sin(th))));
+            }
+            return ring;
+        });
+        return { mesh: generateRingSurfaceFromPoints(rings, color), ends: [pts[0].p, pts[pts.length - 1].p] };
+    }
+
+    // ---------------------------------------------------------------------
+    // 3c. EAR: one surface of revolution around a B-spline outline [r, z]
+    //   (back -> rim -> hollow). The hollow sits cupDrop lower (thicker rim on
+    //   top) and its colour turns from fur to inner.
+    // ---------------------------------------------------------------------
+    function generatePobyEar(profile, cupDrop, fur, inner) {
+        var cp = [];
+        profile.forEach(function (q) { cp.push(q[0], q[1]); });
+        var prof = generateBSpline(cp, 48, 3), n = prof.length / 2, rings = [];
+        for (var i = 0; i < n; i++) {
+            var drop = -cupDrop * smooth((i / (n - 1) - 0.5) / 0.35);       // only the hollow moves down
+            rings.push({ c: [0, drop, prof[i * 2 + 1]], u: [1, 0, 0], w: [0, 1, 0], a: prof[i * 2], b: prof[i * 2] });
+        }
+        var STEP = 48, mesh = generateRingSurface(rings, STEP, fur, true);
+        for (var i = 0; i < n; i++) {
+            var k = smooth((i / (n - 1) - 0.62) / 0.15);
+            for (var j = 0; j <= STEP; j++) {
+                var v = (i * (STEP + 1) + j) * 9;
+                for (var q = 0; q < 3; q++) mesh.vertices[v + 3 + q] = fur[q] + (inner[q] - fur[q]) * k;
+            }
+        }
+        return mesh;
+    }
+
+    // ---------------------------------------------------------------------
+    // 3d. ARM: rings along a 2D B-spline centre line (front view), shoulder -> wrist
+    //   path = [x0, y0, x1, y1, ...] (right arm), size = [s, half-width, half-depth]
+    //   back = how far back the shoulder sits (fades out to 0 at the wrist)
+    //   Returns the rings, the centre line, and the arm's directions.
+    // ---------------------------------------------------------------------
+    function pobyArm(path2d, size, side, z, back, RING) {
+        var path = generateBSpline(path2d, 60, 3), sizes = bsplineTable(size, 60), N = path.length / 2;
+        var W = [0, 0, 1], out = { rings: [], centres: [], W: W };
+        for (var i = 0; i < N; i++) {
+            var p0 = Math.max(i - 1, 0), p1 = Math.min(i + 1, N - 1);
+            var tx = path[p1 * 2] - path[p0 * 2], ty = path[p1 * 2 + 1] - path[p0 * 2 + 1], tl = Math.hypot(tx, ty);
+            // ring square to the curve: U = 2D normal (towards the body at the wrist), D = along the arm
+            var U = [side * ty / tl, -tx / tl, 0], D = [side * tx / tl, ty / tl, 0];
+            var t = i / (N - 1), sz = lookup(sizes, t);
+            var c = [side * path[i * 2], path[i * 2 + 1], z - back * (1 - t)], ring = [];
+            for (var j = 0; j <= RING; j++) {
+                var th = j / RING * 2 * Math.PI;
+                ring.push(add(c, mul(U, sz[1] * Math.cos(th)), mul(W, sz[2] * Math.sin(th))));
+            }
+            out.rings.push(ring); out.centres.push(c);
+            if (i === 0) { out.U0 = U; out.D0 = D; out.shoulder = c; }
+            out.U = U; out.D = D;
+        }
+        out.wrist = [side * path[path.length - 2], path[path.length - 1], z];
+        return out;
+    }
+
+    // ---------------------------------------------------------------------
+    // 3e. PAW: ONE smooth skin in 2 steps
+    //   1. SHAPE: the palm (rings sized by the palm table, rounded end), 3 fingers
+    //      and a thumb (capsules), each a "distance" function (< 0 inside), melted
+    //      together with a SOFT MINIMUM so the fingers grow out of the palm.
+    //   2. SKIN: the ellipsoid's grid (rings × points), each point pushed out along
+    //      its ray from a centre inside the wrist until it reaches that shape, then
+    //      tidied (relaxed) so the points spread evenly.
+    //   The top ring is exactly the arm's last ring, so arm and paw join with no seam.
+    //   spec = { hand, palm, armR, wrist, U, W, D, top (last arm ring), RING }
+    //   Paw coordinates: d = down the arm, u = towards the palm side, w = across.
+    // ---------------------------------------------------------------------
+    function pobyPaw(spec) {
+        var H = spec.hand, wristC = spec.wrist, U = spec.U, W = spec.W, D = spec.D, RING = spec.RING;
+        function P(d, u, w) { return add(wristC, mul(D, d), mul(U, u), mul(W, w)); }
+        var palmRows = bsplineTable(spec.palm, 80);
+        function palmDist(d, u, w) {                          // the palm (and the end of the forearm)
+            var Ld = H.capStart, r = lookup(palmRows, Math.min(d, Ld)), b = r[2];
+            var a = u >= r[3] ? r[1] : r[3] + r[4];          // palm side / back of the hand
+            var uu = (u - r[3]) / a, ww = w / b;
+            if (d <= Ld) return (Math.hypot(uu, ww) - 1) * Math.min(a, b);
+            // rounded end: half an ellipsoid, longer (capBack) on the fuller back of the hand
+            var capLen = H.cap + (H.capBack - H.cap) * smooth(-uu);
+            var dd = (d - Ld) / capLen;
+            return (Math.sqrt(uu * uu + ww * ww + dd * dd) - 1) * Math.min(a, b);
+        }
+        function capsuleDist(q, f) {                          // tube from knuckle A to tip B, radius rA -> rB
+            var A = f.A, BA = [f.B[0] - A[0], f.B[1] - A[1], f.B[2] - A[2]], PA = [q[0] - A[0], q[1] - A[1], q[2] - A[2]];
+            var h = Math.min(1, Math.max(0, dot(PA, BA) / dot(BA, BA)));
+            return Math.hypot(PA[0] - BA[0] * h, PA[1] - BA[1] * h, PA[2] - BA[2] * h) - (f.rA + (f.rB - f.rA) * h);
+        }
+        function smin(a, b, k) {                              // soft minimum: like min, but rounded where they meet
+            var h = Math.max(k - Math.abs(a - b), 0) / k;
+            return Math.min(a, b) - h * h * k / 4;
+        }
+        var digits = H.digits.map(function (f) { return { A: f[0], B: f[1], rA: f[2], rB: f[3] }; });
+        function pawDist(q) {                                 // q = [d, u, w]
+            var f = 1e9;
+            digits.forEach(function (g) { f = smin(f, capsuleDist(q, g), H.kFingers); });
+            var paw = smin(palmDist(q[0], q[1], q[2]), f, H.kPalm);
+            // right at the wrist it is exactly the round arm; morph into the paw over wristBlend cm
+            var t = smooth(q[0] / H.wristBlend);
+            return (Math.hypot(q[1], q[2]) - spec.armR) * (1 - t) + paw * t;
+        }
+        function local(p) { var r = sub(p, wristC); return [dot(r, D), dot(r, U), dot(r, W)]; }
+        // walk from 'from' (inside) along 'dir' until the shape ends; return that point
+        function hit(from, dir) {
+            var t = 0, step = 0.05;
+            while (t < 12 && pawDist(local(add(from, mul(dir, t + step)))) < 0) t += step;
+            var lo = t, hi = t + step;                        // then halve the interval a few times
+            for (var i = 0; i < 20; i++) {
+                var mid = (lo + hi) / 2;
+                if (pawDist(local(add(from, mul(dir, mid)))) < 0) lo = mid; else hi = mid;
+            }
+            return add(from, mul(dir, lo));
+        }
+        function gradient(q, e) {
+            var f0 = pawDist(q);
+            return { f0: f0, g: [pawDist([q[0] + e, q[1], q[2]]) - f0, pawDist([q[0], q[1] + e, q[2]]) - f0, pawDist([q[0], q[1], q[2] + e]) - f0] };
+        }
+        function normalAt(p) {                                // surface direction (finite differences)
+            var g = gradient(local(p), 0.01).g;
+            return normalize(add(mul(D, g[0]), mul(U, g[1]), mul(W, g[2])));
+        }
+        function toSurface(p) {                               // pull a point onto the surface
+            for (var n = 0; n < 4; n++) {
+                var e = 0.005, G = gradient(local(p), e), g = G.g;
+                var gg = (g[0] * g[0] + g[1] * g[1] + g[2] * g[2]) / (e * e) || 1;
+                var k = G.f0 / gg / e;
+                p = sub(p, add(mul(D, g[0] * k), mul(U, g[1] * k), mul(W, g[2] * k)));
+            }
+            return p;
+        }
+
+        // SKIN: rays from a centre above the wrist, like the ellipsoid's u (down) and v (around)
+        var centre = add(wristC, mul(D, -H.centreUp));
+        var a0 = Math.atan2(spec.armR, H.centreUp);           // ray angle (from straight down) that meets the wrist ring
+        var rings = [spec.top];
+        for (var i = 1; i <= H.rings; i++) {
+            var be = a0 * (1 - i / H.rings), ring = [];
+            for (var j = 0; j <= RING; j++) {
+                var th = j / RING * 2 * Math.PI;
+                var dir = add(mul(D, Math.cos(be)), mul(U, Math.sin(be) * Math.cos(th)), mul(W, Math.sin(be) * Math.sin(th)));
+                ring.push(i === H.rings ? hit(centre, D) : hit(centre, dir));
+            }
+            rings.push(ring);
+        }
+        // relax the skin: weight(p) = how much a point may move, keep = pull back onto the surface
+        function relax(times, lambda, weight, keep) {
+            for (var it = 0; it < times; it++) {
+                var lam = typeof lambda === "function" ? lambda(it) : lambda;
+                var next = rings.map(function (r) { return r.slice(); });
+                for (var i = 1; i < rings.length - 1; i++) {
+                    for (var j = 0; j < RING; j++) {
+                        var p = rings[i][j], wgt = weight ? weight(p) : 1;
+                        if (wgt <= 0) continue;
+                        var jl = (j + RING - 1) % RING, jr = (j + 1) % RING;
+                        var avg = mul(add(rings[i - 1][j], rings[i + 1][j], rings[i][jl], rings[i][jr]), 0.25);
+                        next[i][j] = keep ? toSurface(add(mul(p, 1 - lam), mul(avg, lam)))   // halfway to the average, back onto the surface
+                                          : add(p, mul(sub(avg, p), lam * wgt));
+                    }
+                    next[i][RING] = next[i][0];                  // the ring closes on itself
+                }
+                rings = next;
+            }
+        }
+        // TIDY: where rays only graze the surface (sides of the fingers) points bunch up
+        relax(H.tidy, 0.5, null, true);
+        // SOFTEN THE KNUCKLE FOLD on the back of the hand (Taubin: smooth, then undo the shrink)
+        relax(H.foldSmooth, function (it) { return it % 2 ? -0.53 : 0.5; }, function (p) {
+            var q = local(p);
+            return smooth(-q[1] / 0.8) * (1 - smooth(Math.abs(q[0] - H.foldAt) / H.foldWidth));
+        }, false);
+
+        // a flat pad laid on the skin like a DECAL: every point is pressed onto the
+        // curved surface, then lifted by its thickness. size = [half w, half l, thickness, sink];
+        // round = 2 for a round dot, > 2 for a rounded rectangle. origin = the mesh's origin.
+        function pad(from, dir, size, round, origin, color) {
+            var p = hit(from, dir), n = normalAt(p);
+            var X = normalize(sub(W, mul(n, dot(W, n)))), Y = cross(n, X);
+            var STACK = 16, STEP = 40, rings = [];
+            for (var i = 0; i <= STACK; i++) {
+                var u = i / STACK * Math.PI - Math.PI / 2, ring = [];
+                for (var j = 0; j <= STEP; j++) {
+                    var v = j / STEP * 2 * Math.PI, cv = Math.cos(v), sv = Math.sin(v);
+                    var k = Math.pow(Math.pow(Math.abs(cv), round) + Math.pow(Math.abs(sv), round), -1 / round);
+                    var q = [size[0] * Math.cos(u) * cv * k, size[1] * Math.cos(u) * sv * k, size[2] * Math.sin(u)];
+                    var sp = toSurface(add(p, mul(X, q[0]), mul(Y, q[1])));
+                    ring.push(sub(add(sp, mul(normalAt(sp), q[2] - size[3])), origin));
+                }
+                rings.push(ring);
+            }
+            return generateRingSurfaceFromPoints(rings, color);
+        }
+        return { rings: rings, digits: digits, P: P, pad: pad };
+    }
+
+    // ---------------------------------------------------------------------
+    // 3f. PROPS for the bubble-wand story (poby_story.js)
+    // ---------------------------------------------------------------------
+    function propMesh(pos, col, faces) {                 // normals = sum of the face normals around a point
+        var nr = pos.map(function () { return [0, 0, 0]; });
+        for (var f = 0; f < faces.length; f += 3) {
+            var a = pos[faces[f]], b = pos[faces[f + 1]], c = pos[faces[f + 2]];
+            var fn = cross(sub(b, a), sub(c, a));
+            [faces[f], faces[f + 1], faces[f + 2]].forEach(function (i) { nr[i][0] += fn[0]; nr[i][1] += fn[1]; nr[i][2] += fn[2]; });
+        }
+        var v = [];
+        pos.forEach(function (p, i) { var q = normalize(nr[i]); v.push(p[0], p[1], p[2], col[i][0], col[i][1], col[i][2], q[0], q[1], q[2]); });
+        return { vertices: v, faces: faces };
+    }
+    function propGrid(rows, cols, faces) {
+        for (var i = 0; i < rows; i++) for (var j = 0; j < cols; j++) {
+            var p = i * (cols + 1) + j, q = p + cols + 1;
+            faces.push(p, q, p + 1, p + 1, q, q + 1);
+        }
+    }
+    // a stick along +Y from y0 to y1 with round ends (the wand)
+    function generateCapsule(r, y0, y1, color) {
+        var pos = [], col = [], faces = [], SEG = 14, ST = 10;
+        for (var i = 0; i <= ST + 2; i++) {
+            var y, rr;
+            if (i === 0) { y = y0 - r * 0.6; rr = 0.0001; } else if (i === ST + 2) { y = y1 + r * 0.6; rr = 0.0001; }
+            else { y = y0 + (y1 - y0) * (i - 1) / ST; rr = r; }
+            for (var j = 0; j <= SEG; j++) { var a = j / SEG * 2 * Math.PI; pos.push([rr * Math.cos(a), y, rr * Math.sin(a)]); col.push(color); }
+        }
+        propGrid(ST + 2, SEG, faces);
+        return propMesh(pos, col, faces);
+    }
+    // a ring in the XY plane (axis +Z) around centre c (the wand's loop)
+    function generateRing(R, r, c, color) {
+        var pos = [], col = [], faces = [], SU = 40, SV = 12;
+        for (var i = 0; i <= SU; i++) for (var j = 0; j <= SV; j++) {
+            var u = i / SU * 2 * Math.PI, v = j / SV * 2 * Math.PI, k = R + r * Math.cos(v);
+            pos.push([c[0] + k * Math.cos(u), c[1] + k * Math.sin(u), c[2] + r * Math.sin(v)]); col.push(color);
+        }
+        propGrid(SU, SV, faces);
+        return propMesh(pos, col, faces);
+    }
+    // the soap bubble: a unit sphere with soft rainbow colours (soap film)
+    function generateSoapBubble() {
+        var pos = [], col = [], faces = [], ST = 20, SE = 32;
+        for (var i = 0; i <= ST; i++) for (var j = 0; j <= SE; j++) {
+            var u = i / ST * Math.PI - Math.PI / 2, w = j / SE * 2 * Math.PI;
+            var p = [Math.cos(u) * Math.cos(w), Math.sin(u), Math.cos(u) * Math.sin(w)];
+            var h = 2.2 * p[1] + 1.3 * p[0] + 0.7 * p[2];
+            pos.push(p); col.push([0.78 + 0.22 * Math.sin(h), 0.80 + 0.20 * Math.sin(h + 2.1), 0.86 + 0.14 * Math.sin(h + 4.2)]);
+        }
+        propGrid(ST, SE, faces);
+        return propMesh(pos, col, faces);
+    }
+
     return {
+        // course shapes + ring surfaces
         generateBSpline,
         bsplineTable,
         generateEllipsoid,
@@ -796,7 +1296,22 @@ export const POBY_BUILDERS = (function () {
         shiftMesh,
         generateRingSurfaceFromPoints,
         shareNormals,
-        orientMesh
+        orientMesh,
+        // Poby's own shapes
+        pobyBody,
+        pobyHead,
+        generateHeadLine,
+        generatePobyEar,
+        pobyArm,
+        pobyPaw,
+        // props (bubble wand story)
+        generateCapsule,
+        generateRing,
+        generateSoapBubble,
+        // helpers
+        vec: { sub: sub, add: add, mul: mul, dot: dot, cross: cross, normalize: normalize, dist: dist },
+        lookup,
+        rigKey
     };
 })();
 

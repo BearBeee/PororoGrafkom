@@ -2,7 +2,7 @@
 //  node.js — scene-graph classes for Eddy, Poby and Loopy
 //
 //   Node      parent -> children hierarchy (Eddy, Loopy, environment).
-//             Loopy's version = Eddy's + optional scale (default [1,1,1]).
+//             scale, arbitrary-axis rotation (axisAngle), matrixOverride, visible.
 //   MyObject  the course hierarchical object (Poby).
 // =====================================================================
 import { LIBS, POBY_LIBS } from "./libs.js";
@@ -17,7 +17,10 @@ export class Node {
         this.name = name;
         this.position = position || [0, 0, 0];   // [x, y, z] relatif terhadap parent
         this.rotation = rotation || [0, 0, 0];   // [rx, ry, rz] radian, relatif terhadap parent
-        this.scale = scale || [1, 1, 1];         // [sx, sy, sz] (dipakai untuk kedip mata)
+        this.scale = scale || [1, 1, 1];         // [sx, sy, sz] (kedip mata Loopy, napas Eddy, ...)
+        this.axisAngle = null;                   // rotasi sumbu sembarang: { axis: [x,y,z], angle: radian }
+        this.matrixOverride = null;              // kalau diisi, dipakai langsung sebagai matriks lokal (balon Eddy)
+        this.visible = true;                     // false = node & semua anaknya tidak digambar
         this.mesh = null;                        // buffer GPU (boleh kosong untuk node "sendi/pivot")
         this.parent = null;
         this.children = [];
@@ -29,10 +32,32 @@ export class Node {
         return child;
     }
 
-    getLocalMatrix() { return LIBS.compose(this.position, this.rotation, this.scale); }
+    // lepas dari parent
+    detach() {
+        if (this.parent) {
+            var i = this.parent.children.indexOf(this);
+            if (i >= 0) this.parent.children.splice(i, 1);
+            this.parent = null;
+        }
+        return this;
+    }
+
+    // Local = T * Raxis * Rz*Ry*Rx * S
+    getLocalMatrix() {
+        if (this.matrixOverride) return this.matrixOverride;
+        return LIBS.compose(this.position, this.rotation, this.scale, this.axisAngle);
+    }
+
+    // matriks node ini relatif terhadap `ancestor` (hasil perkalian rantai parent -> child)
+    relativeMatrix(ancestor) {
+        var m = this.getLocalMatrix(), p = this.parent;
+        while (p && p !== ancestor) { m = LIBS.multiply(p.getLocalMatrix(), m); p = p.parent; }
+        return m;
+    }
 
     // World = Parent * Local, lalu diteruskan ke seluruh anak
     draw(parentMatrix, render) {
+        if (!this.visible) return;
         var world = LIBS.multiply(parentMatrix, this.getLocalMatrix());
         if (this.mesh) render(this.mesh, world);
         for (var i = 0; i < this.children.length; i++) this.children[i].draw(world, render);
