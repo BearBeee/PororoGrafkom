@@ -1,48 +1,3 @@
-// =====================================================================
-//  loopy-anim.js — animasi Loopy (dipisah dari loopy.js)
-//
-//  createLoopyAnimation(cfg) mengembalikan fungsi update(t).
-//  Fungsinya hanya mengubah position / rotation / scale / axisAngle / mesh
-//  pada node yang diberikan; karena hierarki Node, semua anak ikut bergerak.
-//
-//  Loopy SELALU BERDIRI (tidak ada pose duduk).
-//
-//  LAPIS 1 — IDLE (selalu jalan): napas, kepala menengok, telinga & jambul goyang,
-//            kedip, lambaian kanan + WINK, ekor, kaki bergantian.
-//  LAPIS 2 — PERFORMA "Giliran Loopy" (storyboard detik 20-35, ikut di showcase 45-60).
-//            Satu siklus 15 detik (u = detik ke-berapa dalam siklus):
-//              u 0.2-1.8  Loopy berdiri, kepala miring imut (Rotasi Z)
-//              u 1.6      KUPU-KUPU muncul dari jauh (Arbitrary Rotate: badan & sayap berputar di sumbu
-//                         acak (1.0, 0.5, 0.8) lewat Node.axisAngle -> Node.rotAxisMatrix), lalu terbang berliuk-liuk
-//              u 1.8-2.4  Loopy melihat kupu-kupu dan BADANNYA MEMUTAR ke arah lari (Rotasi sumbu Y)
-//              u 2.0-10.5 LARI MENGEJAR: Loopy benar-benar BERPINDAH tempat (Translasi x,z) menyusuri
-//                         lintasan setengah angka-8 (satu lobe) di lantai; arah hadapnya selalu searah lintasan (jadi tubuhnya
-//                         berputar terus, kadang menghadap kamera, kadang membelakangi), badan condong ke
-//                         depan & miring ke dalam tikungan, bergoyang squash & stretch, kaki
-//                         bergantian terangkat ke badan (tetap menempel) mengikuti jarak tempuh, kedua tangan menggapai.
-//                         Kupu-kupu terbang di depan Loopy (dunia, bukan anak kepala), jaraknya makin dekat
-//              u 5.2-6.2  Loopy berhenti; kupu-kupu hinggap di hidung, Loopy menunduk melihatnya
-//              u 6.3-7.1  Loopy memutar badan menghadap kamera
-//              u 1.8      SQUASH & STRETCH badan (Scaling) di 2 momen: jongkok sebelum lari lalu memanjang saat tancap (u 1.8),
-//              u RUN_S+RUN_T-0.3  memipih saat mengerem berhenti
-//              u 6.2-9.9  Loopy senang: mata jadi "⌒", bertepuk tangan (Hierarchy), kepala miring halus
-//              u 9.2-9.9  Kupu-kupu terbang pergi
-//            Lintasan satu lobe angka-8 berawal & berakhir di titik yang sama (tengah), jadi siklus tersambung mulus.
-//
-//  cfg = {
-//    A        : { root, runner, badan, kepala, jambul, ekor, earL, earR, eyeL, eyeR, winkL, winkR, mulut,
-//                 bahuL, bahuR, kakiL, kakiR, kupu, sayapL, sayapR }
-//    BODY_Y, HEAD_Y, LEG_Y : tinggi badan, pusat kepala & kaki saat berdiri
-//    eyeMesh, winkMesh : mesh bola mata & garis "⌒"
-//    nose     : titik hinggap kupu-kupu (koordinat lokal kepala)
-//    windows  : (opsional) jendela performa dalam detik, default [[20,35],[45,loop]]
-//    loop     : (opsional) panjang video; waktu diulang tiap `loop` detik, default 60
-//    runRx    : (opsional) jangkauan lari kiri-kanan  (unit model, default 3.0)
-//    runRz    : (opsional) jangkauan lari depan-belakang (unit model, default 1.3)
-//  }
-//  Catatan: konvensi rotasi sumbu Y standar (rotasi positif memutar +z ke arah +x); Loopy awalnya
-//  menghadap +z (ke kamera). Kalau lintasan terasa terbalik di scene-mu, ubah tanda yaw di bawah.
-// =====================================================================
 export function createLoopyAnimation(cfg) {
     var A = cfg.A, BODY_Y = cfg.BODY_Y, HEAD_Y = cfg.HEAD_Y, LEG_Y = cfg.LEG_Y,
         eyeMesh = cfg.eyeMesh, winkMesh = cfg.winkMesh;
@@ -54,6 +9,7 @@ export function createLoopyAnimation(cfg) {
     var REACH_Z = 1.2;                      // sudut angkat tangan saat menggapai (radian)
     var TILT_AMP = 0.13;                    // miring kepala saat bertepuk (radian, ~7 derajat)
     var BF_AXIS = [1.0, 0.5, 0.8];          // sumbu acak kupu-kupu (arbitrary axis)
+    var HEAD_AXIS = [0.15, 0.10, 1.0];      // sumbu miring kepala (arbitrary axis): dekat sumbu Z, jadi tampilannya nyaris sama dengan miring biasa
     var BF_SCALE = 0.8;
 
     // ---- lintasan lari: angka-8 (Lissajous 1:2), Loopy melalui satu lobe (PATH_FRAC) di lantai, pusatnya = posisi awal Loopy ----
@@ -266,11 +222,14 @@ export function createLoopyAnimation(cfg) {
                   - clamp01(ly * 0.20 + 0.1) * 0.40 * seeW * (1 - lookW)     // mendongak ke kupu-kupu
                   + 0.10 * lookW;                                            // menunduk ke hidung
         var headY = yawIdle * calm * (1 - 0.8 * tiltW) + 0.6 * look * seeW * (1 - lookW);
-        var headZ = 0.07 * Math.sin(t * 1.3) * calm * (1 - tiltW)
-                  + tiltW * TILT_AMP * Math.sin(TAU * 0.55 * u);             // miring kiri-kanan (sumbu Z)
+        var headZ = 0.07 * Math.sin(t * 1.3) * calm * (1 - tiltW);          // goyang halus saat idle (sumbu Z biasa)
+        // ROTATE ARBITRARY AXIS pada KEPALA: miring imut / saat bertepuk berputar di sumbu bebas HEAD_AXIS
+        // (Node.axisAngle -> Node.rotAxisMatrix, rumus Rodrigues), menggantikan rotasi Z murni yang dulu.
+        var headTilt = tiltW * TILT_AMP * Math.sin(TAU * 0.55 * u);
         A.kepala.rotation[0] = headX;
         A.kepala.rotation[1] = headY;
         A.kepala.rotation[2] = headZ;
+        A.kepala.axisAngle = { axis: HEAD_AXIS, angle: headTilt };
 
         // ================= ARBITRARY ROTATE: kupu-kupu (posisi akhir) =================
         // Titik hidung di frame root (maju kinematik: kepala -> badan -> runner), supaya kupu-kupu hinggap

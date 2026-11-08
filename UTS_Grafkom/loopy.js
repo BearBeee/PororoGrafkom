@@ -2,19 +2,7 @@ import { Node } from "./helpers/node.js";
 import { LOOPY_BUILDERS as B } from "./helpers/builders.js";
 import { createLoopyAnimation } from "./loopy-anim.js";
 
-// =====================================================================
-//  LOOPY — si berang-berang merah muda
-//
-//  createLoopy(GL) membuat shader, mesh & hierarki Loopy di context WebGL
-//  yang sama dengan scene, lalu mengembalikan:
-//     root          : node akar (dasar telapak Loopy di y = 0, tinggi 4.17 unit)
-//     update(t)     : animasi (napas, menengok, kedip, wink, melambai, ekor, LARI mengejar kupu-kupu)
-//     draw(scene)   : gambar Loopy. scene = { P, V, M, camPos }
-// =====================================================================
 export function createLoopy(GL) {
-    /* ================= SHADER =================
-       Vertex shader  : titik -> ruang dunia -> layar, teruskan normal & warna.
-       Fragment shader: pencahayaan per piksel (diffuse lembut + specular Blinn-Phong). */
     var vs = `
         attribute vec3 position, color, normal;
         uniform mat4 Pmatrix, Vmatrix, Mmatrix;
@@ -64,20 +52,20 @@ export function createLoopy(GL) {
     GL.uniform3f(_light, -0.5, 0.8, 1.0);
     GL.uniform3f(_amb, 0.12, 0.12, 0.12);
 
-    /* ================= PALET ================= */
+
     var PINK      = [0.97, 0.56, 0.64];
     var INNER_EAR = [0.99, 0.80, 0.85];
     var WHITE     = [0.98, 0.97, 0.95];
     var BLACK     = [0.04, 0.03, 0.05];
     var NOSE_COL  = [0.45, 0.10, 0.38];
-    var MOUTH_IN  = [0.28, 0.06, 0.12];   // rongga mulut terbuka (merah tua)
+    var MOUTH_IN  = [0.28, 0.06, 0.12];   
     var ORANGE    = [0.95, 0.50, 0.32];
-    var FOOT_COL  = [0.43, 0.22, 0.21];   // telapak kaki coklat tua (berang-berang)
+    var FOOT_COL  = [0.43, 0.22, 0.21];   
     var TOE_COL   = [0.49, 0.26, 0.24];
-    var NAIL_COL  = [0.30, 0.12, 0.15];   // kuku tangan
-    var TOE_NAIL_COL = [0.20, 0.08, 0.08];// kuku kaki
+    var NAIL_COL  = [0.30, 0.12, 0.15];   
+    var TOE_NAIL_COL = [0.20, 0.08, 0.08];
 
-    /* ================= HELPER ================= */
+  
     function makeMesh(geo) {
         var vb = GL.createBuffer(); GL.bindBuffer(GL.ARRAY_BUFFER, vb);
         GL.bufferData(GL.ARRAY_BUFFER, new Float32Array(geo.vertices), GL.STATIC_DRAW);
@@ -85,15 +73,13 @@ export function createLoopy(GL) {
         GL.bufferData(GL.ELEMENT_ARRAY_BUFFER, new Uint16Array(geo.faces), GL.STATIC_DRAW);
         return { vb: vb, fb: fb, n: geo.faces.length };
     }
-    // Berbeda dari Eddy: part() menerima MESH yang sudah jadi (bukan geometri), karena beberapa mesh
-    // dipakai berulang (mata, kuku, jari) dan animasi menukar mesh mata (bola <-> garis wink).
+    
     function part(parent, name, mesh, pos, rot) {
         var node = new Node(name, pos, rot);
         node.mesh = mesh;
         return parent.add(node);
     }
 
-    /* ================= MESH (1 unit = 100 px pada gambar referensi) ================= */
     // KEPALA: shaped head            rx    ryUp  ryDown  rz
     var headMesh = makeMesh(B.generateShapedHead(1.39, 1.67, 1.17, 1.30, PINK, 80, 56, {
         topStart: 0.5,      // pelebaran atas mulai di 50% tinggi
@@ -112,21 +98,19 @@ export function createLoopy(GL) {
     var eyeMesh      = makeMesh(B.generateEllipsoid(0.125, 0.13, 0.075, BLACK, 32, 16));
     var noseMesh     = makeMesh(B.generateEllipticParaboloid(0.30, 0.255, 0.27, NOSE_COL, 48, 20));
     var mouthMesh    = makeMesh(B.generateEllipsoid(0.25, 0.075, 0.05, MOUTH_IN, 32, 16));
-    var teethMesh    = makeMesh(B.generateRoundedBox(0.095, 0.075, 0.04, 4, WHITE, 32, 20));   // 1 gigi seri
-    var tuftMesh1    = makeMesh(B.generateEllipsoid(0.04, 0.32, 0.03, ORANGE, 16, 12));     // jambul daun 1
-    var tuftMesh2    = makeMesh(B.generateEllipsoid(0.04, 0.20, 0.03, ORANGE, 16, 12));     // jambul daun 2
+    var teethMesh    = makeMesh(B.generateRoundedBox(0.095, 0.075, 0.04, 4, WHITE, 32, 20));  
+    var tuftMesh1    = makeMesh(B.generateEllipsoid(0.04, 0.32, 0.03, ORANGE, 16, 12));   
+    var tuftMesh2    = makeMesh(B.generateEllipsoid(0.04, 0.20, 0.03, ORANGE, 16, 12));   
 
     // BADAN: pear body (lebar ~83% lebar kepala) + PERUT ellipsoid putih
     var bodyMesh  = makeMesh(B.generatePearBody(1.15, 1.40, 1.02, PINK, 64, 44, 0.12));
     var bellyMesh = makeMesh(B.generateEllipsoid(0.75, 0.95, 0.50, WHITE, 40, 28));
 
     // LENGAN: swept tube sepanjang Bezier kuadratik, menjuntai ~35 derajat ke bawah-samping.
-    //   P0 = pangkal (tertanam di badan atas), P1 = kontrol lengkung ke luar, P2 = ujung tangan (ARM_END)
     var ARM_P0 = [0.45, 1.05, 0.05], ARM_P1 = [1.05, 0.62, 0.20];
-    var ARM_END = [1.58, -0.27, 0.35];   // ujung tangan sisi kanan (x positif); kuku tumbuh dari sini
-    var ARM_TIP_ANGLE = 2.55;            // arah kuku (rad): miring ke bawah-luar
+    var ARM_END = [1.58, -0.27, 0.35];  
+    var ARM_TIP_ANGLE = 2.55;            
     function armRadius(t) {
-        // sin() naik halus 0.17 -> 0.26, ujung & pangkal dibulatkan (seperempat elips)
         var r = 0.17 + 0.09 * Math.sin(Math.min(t / 0.85, 1.0) * Math.PI / 2);
         if (t > 0.80) { var u = (t - 0.80) / 0.20; r *= Math.sqrt(Math.max(0.0, 1 - u * u)); }
         if (t < 0.12) { var v = (0.12 - t) / 0.12; r *= Math.sqrt(Math.max(0.0, 1 - v * v)); }
@@ -140,7 +124,7 @@ export function createLoopy(GL) {
         }, armRadius, PINK, 80, 32, true, true, [0, 0, 1]));
     }
     var armMeshL = armMesh(-1), armMeshR = armMesh(1);
-    var nailMesh = makeMesh(B.generateCone(0.03, 0.11, NAIL_COL, 12));              // kuku tangan
+    var nailMesh = makeMesh(B.generateCone(0.03, 0.11, NAIL_COL, 12));              
 
     // KAKI: telapak = ellipsoid pipih, jari = ellipsoid kecil, kuku = cone kecil
     var footMesh    = makeMesh(B.generateEllipsoid(0.43, 0.13, 0.53, FOOT_COL, 40, 24));
@@ -148,17 +132,15 @@ export function createLoopy(GL) {
     var toeNailMesh = makeMesh(B.generateCone(0.03, 0.08, TOE_NAIL_COL, 8));
 
     // EKOR dayung berang-berang: swept tube Bezier dari bawah-belakang badan, melengkung lalu NAIK ke atas.
-    //   P0 = pangkal (tertanam di badan bawah), P1 = kontrol (tarik ke belakang), P2 = ujung atas
     var TAIL_P0 = [0, -1.05, -0.45], TAIL_P1 = [0, -0.10, -1.65], TAIL_P2 = [0, 1.10, -1.55];
     function tailRadius(t) {
         // a = setengah lebar di bidang samping (y-z), b = setengah lebar kiri-kanan (x)
-        var w = Math.min(t / 0.7, 1.0); w = w * w * (3 - 2 * w);   // smoothstep
+        var w = Math.min(t / 0.7, 1.0); w = w * w * (3 - 2 * w);   
         var a = 0.10 + 0.19 * w, b = 0.12 + 0.20 * w;
         if (t > 0.86) { var u = (t - 0.86) / 0.14, k = Math.sqrt(Math.max(0.0, 1 - u * u)); a *= k; b *= k; }
         if (t < 0.15) { var v = (0.15 - t) / 0.15, k2 = Math.sqrt(Math.max(0.0, 1 - v * v)); a *= k2; b *= k2; }
         return { a: Math.max(a, 0.02), b: Math.max(b, 0.02) };
     }
-    // refVec [1,0,0]: penampang tidak terpelintir, sisi lebar ekor menghadap kiri-kanan
     var tailMesh = makeMesh(B.generateSweptTube(function (t) { return B.bezier2(TAIL_P0, TAIL_P1, TAIL_P2, t); },
         tailRadius, PINK, 40, 24, true, true, [1, 0, 0]));
 
@@ -200,12 +182,10 @@ export function createLoopy(GL) {
     [-1, 1].forEach(function (s) {
         var tag = s < 0 ? "kiri" : "kanan";
 
-        // SENDI BAHU: pivot di titik B(0.2) kurva lengan, sehingga rotasinya memutar lengan seperti sendi.
-        // Lengan & kuku digeser -pivot agar tetap di tempat semula saat rot = 0.
         var pivot = [s * 0.687, 0.859, 0.11];
         var shoulder = part(loopy, "bahu-" + tag, null, pivot);
         var arm = part(shoulder, "lengan-" + tag, s < 0 ? armMeshL : armMeshR, [-pivot[0], -pivot[1], -pivot[2]]);
-        // 3 kuku di ujung lengan, tersebar tegak lurus arah ujung tangan
+
         var th = ARM_TIP_ANGLE, dirv = [s * Math.sin(th), Math.cos(th)], perp = [-s * Math.cos(th), Math.sin(th)];
         for (var c = -1; c <= 1; c++) {
             part(arm, "kuku-tangan", nailMesh, [
@@ -214,7 +194,6 @@ export function createLoopy(GL) {
                 ARM_END[2]], [0, 0, -s * th]);
         }
 
-        // KAKI (pivot pinggul): telapak + 4 jari (kuku = anak jari)
         var leg = part(loopy, "kaki-" + tag, null, [s * 0.45, -1.34, 0.0], [0, s * 0.42, 0]);
         part(leg, "telapak", footMesh, [0, 0, 0.26]);
         var toeX = [-0.28, -0.093, 0.093, 0.28], toeZ = [0.62, 0.73, 0.73, 0.62];   // jari tengah lebih maju
@@ -230,27 +209,14 @@ export function createLoopy(GL) {
 
     window.loopy = loopy;
 
-    /* ================= SKALA TINGGI KARAKTER =================
-       Target Loopy = 4.17 unit (27 cm; 1 cm = 0.1545 unit, diukur dari Eddy 5.25 unit = 34 cm).
-       Tinggi model asli (puncak kepala -> dasar telapak, jambul tidak dihitung):
-         atas  = HEAD_Y + ryUp = 1.239 + 1.67 = 2.909
-         bawah = BODY_Y + kaki - tebal telapak = -1.00 - 1.34 - 0.13 = -2.47
-       Seluruh karakter diskalakan seragam 4.17 / 5.379 (~0.775), lalu diangkat supaya dasar telapak tepat di y = 0. */
     var MODEL_TOP = 2.909, MODEL_BOTTOM = -2.47;
     var CHAR_SCALE = 4.17 / (MODEL_TOP - MODEL_BOTTOM);
-    // Node "LoopyRoot": M = T * S  ->  diskalakan dulu, lalu diangkat (dasar telapak -2.47 * skala -> y = 0)
     var root = new Node("LoopyRoot", [0, -MODEL_BOTTOM * CHAR_SCALE, 0], [0, 0, 0], [CHAR_SCALE, CHAR_SCALE, CHAR_SCALE]);
-    // Node "lari" (runner) = penggerak seluruh badan Loopy di lantai: TRANSLASI (x,z) + ROTASI arah hadap (sumbu Y).
-    // Dipisah dari root agar posisi/skala root yang diatur main.js tidak terganggu.
     var runner = new Node("lari", [0, 0, 0], [0, 0, 0]);
     root.add(runner);
     runner.add(loopy);
 
-    /* ----- KUPU-KUPU (anak ROOT, bukan anak kepala): badan + 2 pasang sayap + 2 antena -----
-       Dijadikan anak root supaya terbang sendiri di ruang dunia dan TIDAK ikut bergerak saat Loopy berlari
-       (kalau jadi anak kepala, kupu-kupu akan ikut terbawa dan Loopy tidak pernah 'mengejar' apa pun).
-       Sumbu lokal: badan memanjang di +z (depan), sayap terbentang di sumbu x, kepakan = rotasi z di pivot sayap.
-       Posisi & orientasi (termasuk ARBITRARY AXIS) diatur di loopy-anim.js (koordinat frame root). Mulai tersembunyi (skala 0). */
+
     var BF_BODY = [0.25, 0.15, 0.10], BF_FORE = [1.00, 0.78, 0.25], BF_HIND = [1.00, 0.52, 0.20];
     var bfBodyMesh = makeMesh(B.generateEllipsoid(0.035, 0.035, 0.17, BF_BODY, 16, 12));
     var bfForeMesh = makeMesh(B.generateEllipsoid(0.30, 0.012, 0.21, BF_FORE, 28, 16));
@@ -266,14 +232,7 @@ export function createLoopy(GL) {
         return w;
     });
 
-    /* ================= ANIMASI =================
-       Karena hierarki, anak ikut bergerak:
-         - badan naik-turun (napas) -> semua ikut
-         - kepala menengok & miring -> telinga, mata, hidung, mulut, gigi, jambul ikut
-         - telinga & jambul bergoyang, mata berkedip tiap 3.2 dtk
-         - tangan kanan MELAMBAI tiap 6 dtk (+ wink mata kanan), tangan kiri mengayun pelan
-         - ekor menggeleng dari pangkalnya, kaki bergantian terangkat sedikit
-       SPASI = jeda / lanjut (diatur di main.js). */
+   
     var A = {
         root: root, runner: runner, badan: loopy, kepala: head, jambul: tuft, ekor: tailBase,
         earL: loopy.find("telinga-kiri"), earR: loopy.find("telinga-kanan"),
@@ -282,12 +241,9 @@ export function createLoopy(GL) {
         bahuL: loopy.find("bahu-kiri"), bahuR: loopy.find("bahu-kanan"),
         kakiL: loopy.find("kaki-kiri"), kakiR: loopy.find("kaki-kanan")
     };
-    // Logika animasi ada di loopy-anim.js; di sini hanya dirangkai dengan node & mesh Loopy.
     var updateAnimation = createLoopyAnimation({
         A: A, BODY_Y: BODY_Y, HEAD_Y: HEAD_Y, LEG_Y: -1.34, eyeMesh: eyeMesh, winkMesh: winkMesh,
-        nose: [0, 0.34, 1.46]      // titik pusat kupu-kupu bertengger di atas hidung (koordinat kepala)
-        // opsional: windows: [[20, 35], [45, 60]] (detik, giliran Loopy & showcase), loop: 60,
-        //           runRx / runRz: jangkauan lintasan lari (unit model) kiri-kanan / depan-belakang
+        nose: [0, 0.34, 1.46]      
     });
 
     root.printTree();
